@@ -24,7 +24,13 @@ public class CreditTransaction {
 
     private String creditAccount;
 
+    private String transactionId;
+
+    private String message;
+
     private BigDecimal amount;
+
+    private Boolean isWallet;
 
     @Enumerated(EnumType.STRING)
     private CreditStatus status;

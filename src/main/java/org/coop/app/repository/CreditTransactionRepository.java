@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 import org.coop.app.models.Payment;
 
 import java.util.List;
+import java.util.UUID;
 
 @ApplicationScoped
 public class CreditTransactionRepository implements PanacheRepository<CreditTransaction> {
@@ -20,6 +21,13 @@ public class CreditTransactionRepository implements PanacheRepository<CreditTran
                 .filter(ct -> ct.getPayment().equals(payment))
                 .toList();
     }
+    public CreditTransaction findById(UUID id) {
+        return find("id", id).firstResult();
+    }
 
+//    public CreditTransaction findById(UUID uuid) {
+//        return jpaStreamer.stream(CreditTransaction.class)
+//                .filter(ct -> ct.);
+//    }
 }
 

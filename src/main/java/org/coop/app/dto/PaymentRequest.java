@@ -1,6 +1,7 @@
 package org.coop.app.dto;
 
 
+import jakarta.validation.Valid;
 import lombok.Getter;
 import lombok.Setter;
 import java.math.BigDecimal;
@@ -19,7 +20,7 @@ public class PaymentRequest {
 
     private String accountHolderName;
 
-    @NotNull(message = "Balance cannot be empty")
+//    @NotNull(message = "Balance cannot be empty")
     private BigDecimal balance;
 
     @NotNull(message = "Total amount cannot be null")
@@ -27,5 +28,6 @@ public class PaymentRequest {
     private BigDecimal totalAmount;
 
     @Size(min = 1, message = "At least one credit transaction is required")
+    @Valid
     private List<CreditTransactionRequest> creditTransactions;
 }
