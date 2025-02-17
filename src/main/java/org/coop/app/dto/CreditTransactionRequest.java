@@ -15,5 +15,8 @@ public class CreditTransactionRequest {
     @NotNull(message = "Amount cannot be null")
     @Positive(message = "Amount must be positive")
     private BigDecimal amount;
+
+    @NotNull(message = "isWallet cannot be null")
+    private Boolean isWallet;
 }
 

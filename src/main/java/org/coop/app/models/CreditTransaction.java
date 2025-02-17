@@ -26,6 +26,8 @@ public class CreditTransaction {
 
     private BigDecimal amount;
 
+    private Boolean isWallet;
+
     @Enumerated(EnumType.STRING)
     private CreditStatus status;
 }

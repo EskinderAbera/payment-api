@@ -27,7 +27,7 @@ public class payment {
     public Uni<Response> processPayment(@Valid PaymentRequest request) {
         LOG.info("Received payment request for account: " + request.getDebitAccount());
 
-        return  paymentService.savePayment(request)
+        return paymentService.savePayment(request)
                 .onItem().transform(payment -> {
                         return Response.ok(payment).build();
 //                    }
