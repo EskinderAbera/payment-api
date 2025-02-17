@@ -64,7 +64,7 @@ public class CustomerService {
                 }
             }
             return Optional.empty();
-        } catch (Exception e) {
+        } catch (JsonProcessingException e) {
             Log.error("Error fetching customer info", e);
             return Optional.empty();
         }

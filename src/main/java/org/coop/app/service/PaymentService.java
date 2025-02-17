@@ -1,93 +1,118 @@
 package org.coop.app.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
-import org.coop.app.client.ThirdPartyPaymentService;
-import org.coop.app.dto.ApiResponse;
-import org.coop.app.dto.PaymentRequest;
-import org.coop.app.models.Payment;
-import org.coop.app.repository.PaymentRepository;
+import jakarta.ws.rs.ProcessingException;
+import lombok.Value;
+import org.coop.app.dto.*;
+import org.coop.app.entity.CreditStatus;
 import org.coop.app.entity.PaymentStatus;
-import org.jboss.logging.Logger;
+import org.coop.app.exception.BulkTransferException;
+import org.coop.app.models.Payment;
+import org.coop.app.models.CreditTransaction;
+import org.coop.app.repository.PaymentRepository;
+import org.coop.app.repository.CreditTransactionRepository;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.eclipse.microprofile.rest.client.inject.RestClient;
 
-import java.math.BigDecimal;
+import java.net.SocketTimeoutException;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class PaymentService {
 
-    private static final Logger LOG = Logger.getLogger(PaymentService.class);
-
-    @Inject
-    CustomerService customerService;
+    @ConfigProperty(name = "api.key")
+    String apiKey;
 
     @Inject
     PaymentRepository paymentRepository;
 
     @Inject
-    ThirdPartyPaymentService thirdPartyPaymentService;
+    CreditTransactionRepository creditTransactionRepository;
+
+    @Inject
+    @RestClient
+    BulkTransferService bulkTransferService;
+    @Inject
+    CustomerService customerService;
 
     @Transactional
-    public Uni<ApiResponse<?>> savePayment(PaymentRequest request) {
-        LOG.info("Starting payroll payment process...");
+    public PaymentResponse processPayment(PaymentRequest paymentRequest) {
+//        String apiKey = "ddd4076fb15088839ce13f187fa32eeddd3e889e8f016763440bccbf085c54d41bed779d36348b633cc29a5ef114ba85adb6ce669fcc517266a058185ae57efc";
 
-        return Uni.createFrom().item(() -> {
-                    try {
-                        return customerService.fetchCustomerFromCore(request.getDebitAccount());
-                    } catch (JsonProcessingException e) {
-                        throw new RuntimeException("Failed to process customer data", e);
-                    }
-                })
-                .onItem().transformToUni(coreCustomer -> coreCustomer
-                        .map(customerData -> processPayment(request, customerData))
-                        .orElseGet(() -> {
-                            LOG.warn("Customer not found, aborting payment.");
-                            return Uni.createFrom().item(ApiResponse.error(404, "Customer not found"));
-                        }))
-                .onFailure().recoverWithItem(e -> {
-                    LOG.error("Error processing payment", e);
-                    return ApiResponse.error(500, "Internal server error");
-                });
-    }
-
-    private Uni<ApiResponse<?>> processPayment(PaymentRequest request, Map<String, Object> customerData) {
-        BigDecimal availableBalance = convertToBigDecimal(customerData.get("availableBalance"));
-        BigDecimal totalAmount = request.getTotalAmount();
-
-        if (availableBalance.compareTo(totalAmount) < 0) {
-            return Uni.createFrom().item(ApiResponse.error(400, "Insufficient balance"));
-        }
-
+        // Create and save Payment
         Payment payment = new Payment();
-        payment.setDebitAccount(request.getDebitAccount());
-        payment.setBankCode(request.getBankCode());
-        payment.setTotalAmount(totalAmount);
+        payment.setDebitAccount(paymentRequest.getDebitAccount());
+        payment.setBankCode(paymentRequest.getBankCode());
+        payment.setAccountHolderName(paymentRequest.getAccountHolderName());
+        payment.setBalance(paymentRequest.getBalance());
+        payment.setTotalAmount(paymentRequest.getTotalAmount());
         payment.setStatus(PaymentStatus.PENDING);
-        payment.setBalance(availableBalance);
-        payment.setAccountHolderName((String) customerData.get("customerName"));
-
         paymentRepository.persist(payment);
 
-        return Uni.createFrom().item(ApiResponse.success(payment, "Payment initiated successfully"));
+        // Create and save CreditTransactions
+        List<CreditTransaction> creditTransactions = paymentRequest.getCreditTransactions().stream()
+                .map(ctRequest -> {
+                    CreditTransaction ct = new CreditTransaction();
+                    ct.setPayment(payment);
+                    ct.setCreditAccount(ctRequest.getCreditAccount());
+                    ct.setAmount(ctRequest.getAmount());
+                    ct.setStatus(CreditStatus.PENDING);
+                    return ct;
+                }).collect(Collectors.toList());
+        creditTransactionRepository.persist(creditTransactions);
 
-//        return Uni.createFrom().item(payment)
-//                .onItem().transformToUni(p -> paymentRepository.persist(p))
-//                .onItem().transform(p -> ApiResponse.success(p, "Payment initiated successfully"))
-//                .onFailure().recoverWithItem(e -> {
-//                    LOG.error("Failed to persist payment", e);
-//                    return ApiResponse.error(500, "Failed to persist payment");
-//                });
-    }
+        // Prepare BulkTransferRequest
+        BulkTransferRequest bulkTransferRequest = new BulkTransferRequest();
+        bulkTransferRequest.setDebitAccount(payment.getDebitAccount());
+        bulkTransferRequest.setTotalAmount(payment.getTotalAmount());
+        bulkTransferRequest.setBulkId(payment.getId().toString());
+        bulkTransferRequest.setCreditTransactions(creditTransactions.stream()
+                .map(ct -> {
+                    CreditTransactionDetail ctd = new CreditTransactionDetail();
+                    ctd.setOrderId(ct.getId().toString());
+                    ctd.setCreditAccount(ct.getCreditAccount());
+                    ctd.setAmount(ct.getAmount());
+                    return ctd;
+                }).collect(Collectors.toList()));
+        try {
+            BulkTransferResponse bulkTransferResponse = bulkTransferService.processBulkTransfer(apiKey, bulkTransferRequest);
 
-    private BigDecimal convertToBigDecimal(Object value) {
-        if (value instanceof Double) {
-            return BigDecimal.valueOf((Double) value);
-        } else if (value instanceof BigDecimal) {
-            return (BigDecimal) value;
+            // Process response
+            return updateTransactionStatuses(bulkTransferResponse);
+
+        } catch (ProcessingException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof SocketTimeoutException) {
+                throw new BulkTransferException("Bulk transfer request timed out", e);
+            }
+            throw new BulkTransferException("Failed to process bulk transfer", e);
         }
-        throw new IllegalArgumentException("Unsupported type for balance: " + value.getClass().getName());
     }
+
+    @Transactional
+    public PaymentResponse updateTransactionStatuses(BulkTransferResponse bulkTransferResponse) {
+        List<CreditResponse> creditResponses = bulkTransferResponse.getTransactionStatuses().stream()
+                .map(ts -> {
+                    CreditTransaction ct = creditTransactionRepository.findById(UUID.fromString(ts.getOrderId()));
+                    if (ts.getStatus().equals("SUCCESS")) {
+                        ct.setStatus(CreditStatus.COMPLETED);
+                        ct.setTransactionId(ts.getTransactionId());
+                    } else {
+                        ct.setStatus(CreditStatus.FAILED);
+                        ct.setTransactionId(ts.getMessage());
+                    }
+                    creditTransactionRepository.persist(ct);
+                    return new CreditResponse(ct.getCreditAccount(), ct.getStatus().name());
+                })
+                .collect(Collectors.toList());
+
+        return new PaymentResponse("Success", creditResponses);
+    }
+
 }
